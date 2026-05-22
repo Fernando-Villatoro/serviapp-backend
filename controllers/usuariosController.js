@@ -12,59 +12,57 @@ export const obtenerUsuarios = async (req, res) => {
   }
 };
 
-// 2. OBTENER TRABAJADORES PARA EL HOME
+// 2. OBTENER TRABAJADORES — incluye servicio, precio, telefono, ubicacion
 export const obtenerTrabajadores = async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      `SELECT u.id, u.nombre, u.correo, u.tipo,
-              t.descripcion, t.ubicacion, t.precio, t.servicio_id
-       FROM usuarios u
-       JOIN trabajadores t ON t.usuario_id = u.id
-       WHERE u.tipo = 'emprendedor' OR u.tipo = 'trabajador'`
-    );
+    const [rows] = await pool.query(`
+      SELECT 
+        u.id,
+        u.nombre,
+        u.correo,
+        u.tipo,
+        t.descripcion,
+        t.ubicacion,
+        t.precio,
+        t.telefono,
+        t.servicio
+      FROM usuarios u
+      INNER JOIN trabajadores t ON t.usuario_id = u.id
+      WHERE u.tipo = 'emprendedor' OR u.tipo = 'trabajador'
+    `);
     res.json(rows);
   } catch (error) {
     res.status(500).json({ mensaje: "Error al obtener trabajadores", error: error.message });
   }
 };
 
-// 3. REGISTRO COMPLETO (Usuario + Perfil de Trabajador)
+// 3. REGISTRO
 export const register = async (req, res) => {
   const connection = await pool.getConnection();
   try {
     const { nombre, correo, password, tipo } = req.body;
-
     if (!nombre || !correo || !password || !tipo) {
       return res.status(400).json({ mensaje: "Todos los campos son obligatorios" });
     }
-
-    const contraseñaEncriptada = await bcrypt.hash(password, 10);
-
+    const hash = await bcrypt.hash(password, 10);
     await connection.beginTransaction();
-
-    const [userResult] = await connection.query(
+    const [result] = await connection.query(
       `INSERT INTO usuarios (nombre, correo, contraseña, tipo) VALUES (?, ?, ?, ?)`,
-      [nombre, correo, contraseñaEncriptada, tipo]
+      [nombre, correo, hash, tipo]
     );
-
-    const nuevoUsuarioId = userResult.insertId;
-
+    const uid = result.insertId;
     if (tipo === "emprendedor" || tipo === "trabajador") {
       await connection.query(
-        `INSERT INTO trabajadores (usuario_id, descripcion, ubicacion, precio)
-         VALUES (?, ?, ?, ?)`,
-        [nuevoUsuarioId, "¡Bienvenido! Edita tu perfil.", "Pendiente", 0]
+        `INSERT INTO trabajadores (usuario_id, descripcion, ubicacion, precio, telefono, servicio)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [uid, "Edita tu perfil para describir tus servicios.", "Pendiente", 0, "", ""]
       );
     }
-
     await connection.commit();
-
     res.status(201).json({ mensaje: `Registro exitoso como ${tipo}.` });
-
   } catch (error) {
     await connection.rollback();
-    console.error("Error en registro:", error);
-    res.status(500).json({ mensaje: "Error al registrar usuario", error: error.message });
+    res.status(500).json({ mensaje: "Error al registrar", error: error.message });
   } finally {
     connection.release();
   }
@@ -74,22 +72,23 @@ export const register = async (req, res) => {
 export const login = async (req, res) => {
   try {
     const { correo, password } = req.body;
-
     if (!correo || !password) {
       return res.status(400).json({ mensaje: "Correo y contraseña son obligatorios" });
     }
-
     const [rows] = await pool.query("SELECT * FROM usuarios WHERE correo = ?", [correo]);
-
-    if (rows.length === 0) {
-      return res.status(404).json({ mensaje: "Usuario no encontrado" });
-    }
-
+    if (rows.length === 0) return res.status(404).json({ mensaje: "Usuario no encontrado" });
     const usuario = rows[0];
-    const passwordCorrecta = await bcrypt.compare(password, usuario.contraseña);
+    const ok = await bcrypt.compare(password, usuario.contraseña);
+    if (!ok) return res.status(401).json({ mensaje: "Contraseña incorrecta" });
 
-    if (!passwordCorrecta) {
-      return res.status(401).json({ mensaje: "Contraseña incorrecta" });
+    // Si es trabajador, traer también sus datos de perfil
+    let perfilTrabajador = {};
+    if (usuario.tipo === 'trabajador' || usuario.tipo === 'emprendedor') {
+      const [t] = await pool.query(
+        "SELECT descripcion, ubicacion, precio, telefono, servicio FROM trabajadores WHERE usuario_id = ?",
+        [usuario.id]
+      );
+      if (t.length > 0) perfilTrabajador = t[0];
     }
 
     const token = jwt.sign(
@@ -97,7 +96,6 @@ export const login = async (req, res) => {
       process.env.JWT_SECRET || "secret_key_serviapp_2026",
       { expiresIn: "4h" }
     );
-
     res.json({
       mensaje: "Login exitoso",
       token,
@@ -105,10 +103,10 @@ export const login = async (req, res) => {
         id: usuario.id,
         nombre: usuario.nombre,
         correo: usuario.correo,
-        tipo: usuario.tipo
+        tipo: usuario.tipo,
+        ...perfilTrabajador
       }
     });
-
   } catch (error) {
     res.status(500).json({ mensaje: "Error en el servidor", error: error.message });
   }
@@ -119,18 +117,12 @@ export const actualizarPerfil = async (req, res) => {
   try {
     const { id } = req.params;
     const { descripcion, ubicacion, precio, telefono, servicio } = req.body;
-
     await pool.query(
-      `UPDATE trabajadores SET descripcion=?, ubicacion=?, precio=?, servicio_id=NULL
-       WHERE usuario_id=?`,
-      [descripcion, ubicacion, precio || 0, id]
+      `UPDATE trabajadores 
+       SET descripcion = ?, ubicacion = ?, precio = ?, telefono = ?, servicio = ?
+       WHERE usuario_id = ?`,
+      [descripcion, ubicacion, precio || 0, telefono || "", servicio || "", id]
     );
-
-    // También guarda teléfono y servicio en la tabla usuarios si tienes esas columnas
-    // Si no las tienes, puedes agregar estas columnas:
-    // ALTER TABLE trabajadores ADD COLUMN telefono VARCHAR(20);
-    // ALTER TABLE trabajadores ADD COLUMN servicio VARCHAR(100);
-
     res.json({ mensaje: "Perfil actualizado correctamente" });
   } catch (error) {
     res.status(500).json({ mensaje: "Error al actualizar perfil", error: error.message });
